@@ -1,4 +1,4 @@
-# Enterprise Authenticating Proxy (EAP) 🛡️🚀
+# External Allowlist Proxy (EAP) 🛡️🚀
 
 A highly optimized, zero-trust, cloud-native authenticating reverse proxy built in Go. EAP secures target backends by providing automatic identity injection, dual-speed rate limiting, and seamless user error navigation.
 
