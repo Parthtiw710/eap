@@ -1,0 +1,12 @@
+{
+  "name": "eap-express-demo",
+  "version": "1.0.0",
+  "description": "Demo application using @arcops/eap middleware",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@arcops/eap": "^1.0.0"
+  }
+}

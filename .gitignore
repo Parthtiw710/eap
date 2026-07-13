@@ -2,7 +2,6 @@
 main
 tmp
 eap_test
-example/
 
 # Dependency directories
 node_modules/

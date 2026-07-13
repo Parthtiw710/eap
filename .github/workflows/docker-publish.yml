@@ -3,6 +3,14 @@ name: Publish Docker Image
 on:
   push:
     branches: [ "main" ]
+    paths:
+      - 'pkg/**'
+      - 'main.go'
+      - 'Dockerfile'
+      - '.gitignore'
+      - 'go.mod'
+      - 'go.sum'
+      - 'public/**'
   release:
     types: [published]
 
