@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 
 	"eap/pkg"
 
@@ -53,9 +54,25 @@ func main() {
 	http.HandleFunc("/login", pkg.HandleLogin)
 	http.HandleFunc("/logout", pkg.HandleLogout)
 	http.HandleFunc("/.well-known/jwks.json", pkg.HandleJWKS)
+	http.HandleFunc("/tunnel/poll", pkg.HandleTunnelPoll)
+	http.HandleFunc("/tunnel/respond", pkg.HandleTunnelRespond)
 
 	// Catch-all route: Handles redirects, 404s, and proxies all other requests to TARGET_URL
 	http.HandleFunc("/", pkg.HandleProxy)
+
+	// Start local tunnel in the background if enabled
+	if os.Getenv("LOCAL_TUNNEL") == "true" {
+		serverURL := os.Getenv("EAP_SERVER_URL")
+		token := os.Getenv("TUNNEL_TOKEN")
+		portStr := os.Getenv("TUNNEL_PORT")
+		tunnelPort := 8081
+		if portStr != "" {
+			if p, err := strconv.Atoi(portStr); err == nil {
+				tunnelPort = p
+			}
+		}
+		go pkg.StartLocalTunnel(serverURL, token, tunnelPort)
+	}
 
 	log.Println("Server is running on port:", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))

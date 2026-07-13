@@ -74,26 +74,11 @@ func getClientIP(r *http.Request) string {
 }
 
 // IsRateLimited checks if a client has exceeded their request limit
-func IsRateLimited(r *http.Request) bool {
-	// Track by email if logged in (cookie or bearer token), otherwise fallback to IP
+func IsRateLimited(r *http.Request, email string, isS2S bool) bool {
+	// Track by email if logged in, otherwise fallback to IP
 	key := getClientIP(r)
-	isS2S := false
-
-	// Check if S2S Bearer token is present
-	authHeader := r.Header.Get("Authorization")
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if email, err := VerifySession(token); err == nil && email != "" {
-			key = email
-			isS2S = true
-		}
-	} else {
-		// Otherwise check for browser session cookie
-		if cookie, err := r.Cookie("eap_session"); err == nil && cookie.Value != "" {
-			if email, err := VerifySession(cookie.Value); err == nil && email != "" {
-				key = email
-			}
-		}
+	if email != "" {
+		key = email
 	}
 
 	clientsMu.Lock()

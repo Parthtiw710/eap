@@ -15,15 +15,22 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
 var (
-	signKey  *rsa.PrivateKey
-	jwksJSON []byte
+	signKey    *rsa.PrivateKey
+	jwksJSON   []byte
+	tokenCache sync.Map
 )
+
+type cachedToken struct {
+	token     string
+	expiresAt time.Time
+}
 
 // InitJWKS loads the RSA private key from env and prepares the JWKS public key payload
 func InitJWKS() {
@@ -89,6 +96,31 @@ func HandleJWKS(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(jwksJSON)
+}
+
+// GenerateRS256TokenCached retrieves a cached RS256 token or generates a new one if it is missing or close to expiration.
+func GenerateRS256TokenCached(email string) (string, error) {
+	if val, ok := tokenCache.Load(email); ok {
+		cached := val.(cachedToken)
+		// Reuse if token is still valid for at least 5 more minutes
+		if time.Now().Before(cached.expiresAt.Add(-5 * time.Minute)) {
+			return cached.token, nil
+		}
+	}
+
+	// Generate new token
+	token, err := GenerateRS256Token(email)
+	if err != nil {
+		return "", err
+	}
+
+	// Cache it
+	tokenCache.Store(email, cachedToken{
+		token:     token,
+		expiresAt: time.Now().Add(24 * time.Hour),
+	})
+
+	return token, nil
 }
 
 // GenerateRS256Token signs a token with the RSA private key (used by cloud providers to verify the proxy identity)
@@ -252,7 +284,7 @@ func InjectAuthHeaders(req *http.Request, targetURLStr string, email string) {
 		os.Getenv("KUBERNETES_ONLY") != "true" {
 
 		if email != "" && os.Getenv("RSA_PRIVATE_KEY") != "" {
-			token, err := GenerateRS256Token(email)
+			token, err := GenerateRS256TokenCached(email)
 			if err == nil && token != "" {
 				req.Header.Set("Authorization", "Bearer "+token)
 			} else if err != nil {

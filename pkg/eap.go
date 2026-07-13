@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"embed"
+	"encoding/json"
 	"html/template"
 	"io"
 	"log"
@@ -11,6 +12,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 var (
@@ -80,6 +84,68 @@ func isEmailAllowed(email string) bool {
 }
 
 func proxyRequest(w http.ResponseWriter, r *http.Request, targetURLStr string, email string) {
+	if targetURLStr == "tunnel" {
+		var bodyBytes []byte
+		if r.Body != nil {
+			var err error
+			bodyBytes, err = io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "failed to read body", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		id := strconv.FormatUint(atomic.AddUint64(&requestCounter, 1), 10)
+		respCh := make(chan *TunnelResponse, 1)
+
+		activeTunnelRequestsMu.Lock()
+		activeTunnelRequests[id] = respCh
+		activeTunnelRequestsMu.Unlock()
+
+		defer func() {
+			activeTunnelRequestsMu.Lock()
+			delete(activeTunnelRequests, id)
+			activeTunnelRequestsMu.Unlock()
+		}()
+
+		headers := make(map[string][]string)
+		for k, v := range r.Header {
+			headers[k] = v
+		}
+		headers["X-User-Email"] = []string{email}
+
+		pendingReq := &PendingRequest{
+			ID:      id,
+			Method:  r.Method,
+			Path:    r.URL.Path,
+			Query:   r.URL.RawQuery,
+			Headers: headers,
+			Body:    bodyBytes,
+		}
+
+		select {
+		case pendingTunnelRequests <- pendingReq:
+		default:
+			http.Error(w, "Tunnel queue full", http.StatusServiceUnavailable)
+			return
+		}
+
+		select {
+		case resp := <-respCh:
+			for k, values := range resp.Headers {
+				for _, v := range values {
+					w.Header().Add(k, v)
+				}
+			}
+			w.WriteHeader(resp.Status)
+			w.Write(resp.Body)
+		case <-time.After(30 * time.Second):
+			http.Error(w, "Tunnel Timeout", http.StatusGatewayTimeout)
+		case <-r.Context().Done():
+		}
+		return
+	}
+
 	targetURL, err := url.Parse(targetURLStr)
 	if err != nil {
 		http.Error(w, "invalid URL", http.StatusInternalServerError)
@@ -119,22 +185,9 @@ func proxyRequest(w http.ResponseWriter, r *http.Request, targetURLStr string, e
 }
 
 func HandleProxy(w http.ResponseWriter, r *http.Request) {
-	// Exclude auth/login/logout and assets routes so they don't get proxied if matched here
-	if r.URL.Path == "/login" || r.URL.Path == "/auth/callback" || r.URL.Path == "/logout" || strings.HasPrefix(r.URL.Path, "/error/") || strings.HasPrefix(r.URL.Path, "/public/") {
+	// Exclude auth/login/logout, tunnel, and assets routes so they don't get proxied if matched here
+	if r.URL.Path == "/login" || r.URL.Path == "/auth/callback" || r.URL.Path == "/logout" || r.URL.Path == "/tunnel/poll" || r.URL.Path == "/tunnel/respond" || strings.HasPrefix(r.URL.Path, "/error/") || strings.HasPrefix(r.URL.Path, "/public/") {
 		http.Redirect(w, r, "/error/404", http.StatusFound)
-		return
-	}
-
-	// Rate limit check
-	if IsRateLimited(r) {
-		authHeader := r.Header.Get("Authorization")
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			w.Header().Set("Retry-After", "1")
-			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-			return
-		}
-		originalURL := url.QueryEscape(r.URL.RequestURI())
-		http.Redirect(w, r, "/error/429?redirect_to="+originalURL, http.StatusFound)
 		return
 	}
 
@@ -144,46 +197,62 @@ func HandleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var email string
+	var isS2S bool
+	var hasAuthHeader bool
+	var authErr error
+
+	// Extract and verify credentials first
 	authHeader := r.Header.Get("Authorization")
 	if strings.HasPrefix(authHeader, "Bearer ") {
+		hasAuthHeader = true
 		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if email, err := VerifySession(token); err == nil {
-			// S2S Token valid: proxy directly
-			proxyRequest(w, r, targetURLStr, email)
+		email, authErr = VerifySession(token)
+		if authErr == nil && email != "" {
+			isS2S = true
+		}
+	} else {
+		if cookie, err := r.Cookie("eap_session"); err == nil && cookie.Value != "" {
+			email, authErr = VerifySession(cookie.Value)
+		}
+	}
+
+	// Rate limit check
+	if IsRateLimited(r, email, isS2S) {
+		if isS2S {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 			return
 		}
+		originalURL := url.QueryEscape(r.URL.RequestURI())
+		http.Redirect(w, r, "/error/429?redirect_to="+originalURL, http.StatusFound)
+		return
+	}
 
+	// S2S verification failure
+	if hasAuthHeader && (authErr != nil || email == "") {
 		http.Error(w, "Unauthorized S2S token", http.StatusUnauthorized)
 		return
 	}
 
-	sessionCookie, err := r.Cookie("eap_session")
-	if err != nil {
-		// No session: save current URL and redirect to Google Login
-		redirectTo := r.URL.RequestURI()
-		if strings.Contains(r.URL.Path, ".") || (r.Header.Get("Accept") != "" && !strings.Contains(r.Header.Get("Accept"), "text/html")) {
-			redirectTo = "/"
-		}
-		http.SetCookie(w, &http.Cookie{
-			Name:     "redirect_to",
-			Value:    redirectTo,
-			Path:     "/",
-			HttpOnly: true,
-		})
-		http.Redirect(w, r, "/login", http.StatusFound)
+	// S2S verification success
+	if isS2S {
+		proxyRequest(w, r, targetURLStr, email)
 		return
 	}
 
-	email, err := VerifySession(sessionCookie.Value)
-	if err != nil {
-		// Clear the invalid session cookie
-		http.SetCookie(w, &http.Cookie{
-			Name:     "eap_session",
-			Value:    "",
-			Path:     "/",
-			MaxAge:   -1,
-			HttpOnly: true,
-		})
+	// Normal web session checking
+	if email == "" || authErr != nil {
+		// Clear session cookie if it exists but is invalid
+		if _, err := r.Cookie("eap_session"); err == nil {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "eap_session",
+				Value:    "",
+				Path:     "/",
+				MaxAge:   -1,
+				HttpOnly: true,
+			})
+		}
 		redirectTo := r.URL.RequestURI()
 		if strings.Contains(r.URL.Path, ".") || (r.Header.Get("Accept") != "" && !strings.Contains(r.Header.Get("Accept"), "text/html")) {
 			redirectTo = "/"
@@ -286,4 +355,73 @@ func HandleLogout(w http.ResponseWriter, r *http.Request) {
 
 	// Redirect to login page
 	http.Redirect(w, r, "/login", http.StatusFound)
+}
+
+type PendingRequest struct {
+	ID      string              `json:"id"`
+	Method  string              `json:"method"`
+	Path    string              `json:"path"`
+	Query   string              `json:"query"`
+	Headers map[string][]string `json:"headers"`
+	Body    []byte              `json:"body"`
+}
+
+type TunnelResponse struct {
+	Status  int                 `json:"status"`
+	Headers map[string][]string `json:"headers"`
+	Body    []byte              `json:"body"`
+}
+
+var (
+	requestCounter         uint64
+	activeTunnelRequests   = make(map[string]chan *TunnelResponse)
+	activeTunnelRequestsMu sync.RWMutex
+	pendingTunnelRequests  = make(chan *PendingRequest, 100)
+)
+
+func HandleTunnelPoll(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	expectedToken := os.Getenv("TUNNEL_TOKEN")
+	if expectedToken == "" || token != expectedToken {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	select {
+	case req := <-pendingTunnelRequests:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(req)
+	case <-time.After(15 * time.Second):
+		w.WriteHeader(http.StatusNoContent)
+	case <-r.Context().Done():
+	}
+}
+
+func HandleTunnelRespond(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	id := r.URL.Query().Get("id")
+	expectedToken := os.Getenv("TUNNEL_TOKEN")
+	if expectedToken == "" || token != expectedToken {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var tunnelResp TunnelResponse
+	if err := json.NewDecoder(r.Body).Decode(&tunnelResp); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	activeTunnelRequestsMu.RLock()
+	ch, exists := activeTunnelRequests[id]
+	activeTunnelRequestsMu.RUnlock()
+
+	if exists {
+		select {
+		case ch <- &tunnelResp:
+		default:
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
 }

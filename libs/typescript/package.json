@@ -1,0 +1,24 @@
+{
+  "name": "@arcops/eap",
+  "version": "1.0.0",
+  "description": "External Authentication Proxy (EAP) Middleware and Client SDK for Node.js",
+  "main": "dist/eap.js",
+  "types": "dist/eap.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "keywords": [
+    "auth",
+    "proxy",
+    "jwt",
+    "middleware",
+    "google-oauth",
+    "localtunnel"
+  ],
+  "author": "Parth Tiwari",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
+  }
+}

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eap-middleware"
+version = "1.0.0"
+description = "External Authentication Proxy (EAP) Middleware and Client SDK for Python"
+readme = "README.md"
+requires-python = ">=3.7"
+license = {text = "MIT"}
+authors = [
+    {name = "Parth Tiwari", email = "www.parthtiwari@gmail.com"}
+]
+keywords = ["auth", "proxy", "jwt", "middleware", "google-oauth", "localtunnel"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[tool.setuptools]
+py-modules = ["eap"]
